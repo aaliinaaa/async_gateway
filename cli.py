@@ -1,8 +1,5 @@
 """
 CLI-модуль для запуска тестовых сценариев.
-
-Использование:
-    python main.py test --scenario all --repeats 10 --output report/
 """
 
 import argparse
@@ -34,6 +31,8 @@ class TestRunResult:
     total_requests: int
     avg_wait_ms: float = 0.0
     max_wait_ms: float = 0.0
+    total_wait_ms: float = 0.0
+    avg_elapsed_ms: float = 0.0
     variance_ms: float = 0.0
     concurrency_history: List[int] = None
     
@@ -84,6 +83,8 @@ class TestRunner:
                     
                     avg_wait = 0.0
                     max_wait = 0.0
+                    total_wait = 0.0
+                    avg_elapsed = 0.0
                     variance = 0.0
                     concurrency_hist = None
                     
@@ -99,6 +100,18 @@ class TestRunner:
                         if variances:
                             variance = sum(variances) / len(variances)
                     
+                    # Для fixed и timeout_race берем из summary
+                    if strategy != "adaptive":
+                        avg_wait = summary.get("avg_wait_ms", 0)
+                        max_wait = summary.get("max_wait_ms", 0)
+                        total_wait = summary.get("total_wait_ms", 0)
+                        avg_elapsed = summary.get("avg_elapsed_ms", 0)
+                    else:
+                        avg_wait = summary.get("avg_wait_ms", 0)
+                        max_wait = summary.get("max_wait_ms", 0)
+                        total_wait = summary.get("total_wait_ms", 0)
+                        avg_elapsed = summary.get("avg_elapsed_ms", 0)
+                    
                     result = TestRunResult(
                         scenario=scenario_name,
                         strategy=strategy,
@@ -110,13 +123,15 @@ class TestRunner:
                         total_requests=summary["total"],
                         avg_wait_ms=round(avg_wait, 2),
                         max_wait_ms=round(max_wait, 2),
+                        total_wait_ms=round(total_wait, 2),
+                        avg_elapsed_ms=round(avg_elapsed, 2),
                         variance_ms=round(variance, 2),
                         concurrency_history=concurrency_hist
                     )
                     self.results.append(result)
                     print(f"    Прогон {i+1}/{self.repeats}: {elapsed:.0f}ms "
-                          f"(OK:{summary['successful']}, FAIL:{summary['failed']}, TO:{timeouts}, "
-                          f"wait:{avg_wait:.1f}ms)")
+                          f"(OK:{summary['successful']}, FAIL:{summary['failed']}, TO:{timeouts}) "
+                          f"wait:{avg_wait:.1f}ms, total_wait:{total_wait:.1f}ms")
         finally:
             for emu in emulators:
                 await emu.stop()
@@ -133,7 +148,7 @@ class TestRunner:
             writer = csv.DictWriter(f, fieldnames=[
                 "scenario", "strategy", "repeat", "total_time_ms",
                 "successful", "failed", "timeouts", "total_requests",
-                "avg_wait_ms", "max_wait_ms", "variance_ms"
+                "avg_wait_ms", "max_wait_ms", "total_wait_ms", "avg_elapsed_ms", "variance_ms"
             ])
             writer.writeheader()
             for r in self.results:
@@ -147,6 +162,7 @@ class TestRunner:
         self._chart_success_failures()
         self._chart_adaptive_concurrency()
         self._chart_wait_time_comparison()
+        self._chart_total_wait_comparison()
         self._chart_variance_comparison()
         print(f"✓ Графики сохранены в: {self.output_dir}/")
     
@@ -220,6 +236,7 @@ class TestRunner:
         plt.close()
 
     def _chart_wait_time_comparison(self):
+        """Сравнение среднего времени ожидания в семафоре."""
         fig, ax = plt.subplots(figsize=(10, 6))
         
         scenarios = ["A", "B", "C"]
@@ -250,6 +267,40 @@ class TestRunner:
         
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, "chart_wait_time.png"), dpi=150)
+        plt.close()
+
+    def _chart_total_wait_comparison(self):
+        """Сравнение суммарного времени ожидания (ключевая метрика!)."""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        scenarios = ["A", "B", "C"]
+        x = np.arange(len(scenarios))
+        width = 0.25
+        
+        for i, strategy in enumerate(self.STRATEGIES):
+            total_waits = []
+            for scenario in scenarios:
+                runs = [r for r in self.results 
+                       if r.scenario == scenario and r.strategy == strategy]
+                if runs:
+                    avg_total = sum(r.total_wait_ms for r in runs) / len(runs)
+                    total_waits.append(avg_total)
+                else:
+                    total_waits.append(0)
+            
+            offset = width * (i - 1)
+            ax.bar(x + offset, total_waits, width, label=strategy)
+        
+        ax.set_xlabel("Сценарий")
+        ax.set_ylabel("Суммарное время ожидания (мс)")
+        ax.set_title("Суммарное время ожидания в семафоре (все хосты)")
+        ax.set_xticks(x)
+        ax.set_xticklabels(scenarios)
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, "chart_total_wait.png"), dpi=150)
         plt.close()
 
     def _chart_variance_comparison(self):
@@ -286,10 +337,22 @@ class TestRunner:
         plt.close()
     
     def _chart_adaptive_concurrency(self):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        scenarios = ["A", "B", "C"]
+        """График concurrency — адаптивный масштаб по количеству хостов."""
+        # Собираем все сценарии где есть adaptive
+        all_scenarios = sorted(set(r.scenario for r in self.results 
+                                   if r.strategy == "adaptive" and r.concurrency_history))
         
-        for idx, scenario in enumerate(scenarios):
+        if not all_scenarios:
+            return
+        
+        # Один график на сценарий, адаптивное количество subplots
+        n_scenarios = len(all_scenarios)
+        fig, axes = plt.subplots(1, n_scenarios, figsize=(5 * n_scenarios + 2, 6))
+        
+        if n_scenarios == 1:
+            axes = [axes]
+        
+        for idx, scenario in enumerate(all_scenarios):
             ax = axes[idx]
             adaptive_runs = [
                 r for r in self.results 
@@ -300,6 +363,7 @@ class TestRunner:
                 ax.set_title(f"Сценарий {scenario} — нет данных")
                 continue
             
+            # Усредняем по прогонам
             max_hosts = max(len(r.concurrency_history) for r in adaptive_runs)
             avg_concurrency = []
             for h in range(max_hosts):
@@ -307,13 +371,18 @@ class TestRunner:
                          if len(r.concurrency_history) > h]
                 avg_concurrency.append(sum(values) / len(values) if values else 0)
             
+            # Адаптивный лимит Y
+            y_max = max(avg_concurrency) if avg_concurrency else 5
+            y_max = max(y_max, 1.5)  # Минимум 1.5 для читаемости
+            
             ax.plot(range(1, len(avg_concurrency) + 1), avg_concurrency, 
-                   marker='o', linewidth=2, markersize=8)
+                   marker='o', linewidth=2, markersize=6)
             ax.set_xlabel("Номер хоста")
             ax.set_ylabel("Средний concurrency")
-            ax.set_title(f"Сценарий {scenario}")
+            ax.set_title(f"Сценарий {scenario} ({len(adaptive_runs)} прогонов)")
             ax.grid(True, alpha=0.3)
-            ax.set_ylim(0, 6)
+            ax.set_ylim(0, y_max * 1.2)
+            ax.set_xlim(0.5, len(avg_concurrency) + 0.5)
         
         plt.suptitle("Adaptive: динамика concurrency по хостам", fontsize=14)
         plt.tight_layout()
@@ -325,11 +394,18 @@ class TestRunner:
             scenarios = ["A", "B", "C"]
         
         for sc_name in scenarios:
-            print(f"\n{'='*50}")
-            print(f"Запуск сценария {sc_name}")
-            print(f"{'='*50}")
-            emulators = EmulatorSuite.get_scenario(sc_name)
-            await self.run_scenario(sc_name, emulators)
+            if sc_name == "B_large":
+                print(f"\n{'='*50}")
+                print(f"Запуск сценария B_large (50 хостов)")
+                print(f"{'='*50}")
+                emulators = EmulatorSuite.create_scenario_b_large()
+                await self.run_scenario("B_large", emulators)
+            else:
+                print(f"\n{'='*50}")
+                print(f"Запуск сценария {sc_name}")
+                print(f"{'='*50}")
+                emulators = EmulatorSuite.get_scenario(sc_name)
+                await self.run_scenario(sc_name, emulators)
         
         print(f"\n{'='*50}")
         print("Сохранение результатов...")
@@ -345,7 +421,7 @@ def main():
     
     test_parser = subparsers.add_parser("test", help="Запустить тестовые сценарии")
     test_parser.add_argument("--scenario", nargs="+", default=["all"],
-                           choices=["A", "B", "C", "all"],
+                           choices=["A", "B", "C", "B_large", "all"],
                            help="Сценарии для запуска")
     test_parser.add_argument("--repeats", type=int, default=10,
                            help="Количество повторений")

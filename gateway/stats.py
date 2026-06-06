@@ -21,14 +21,14 @@ class RequestRecord:
 
 
 class URLStats:
-    WINDOW_SIZE = 10
+    WINDOW_SIZE = 50
     
     ERROR_THRESHOLD = 0.20
     SLOW_THRESHOLD_MS = 1500.0
     FAST_THRESHOLD_MS = 300.0
     
     MIN_CONCURRENT = 1
-    MAX_CONCURRENT = 5
+    MAX_CONCURRENT = 20
     
     def __init__(self, initial_concurrent: int = 3):
         self.records: deque[RequestRecord] = deque(maxlen=self.WINDOW_SIZE)

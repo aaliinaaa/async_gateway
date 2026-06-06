@@ -1,5 +1,5 @@
 """
-Ядро агрегации: объединяет результаты от всех стратегий в единый ответ.
+Ядро агрегации.
 """
 
 import uuid
@@ -22,7 +22,7 @@ async def aggregate(
     start_time = time.perf_counter()
     
     timeout = aiohttp.ClientTimeout(total=timeout_sec + 5)
-    conn = aiohttp.TCPConnector(limit=100, limit_per_host=30)
+    conn = aiohttp.TCPConnector(limit=200, limit_per_host=50)
     
     session = aiohttp.ClientSession(connector=conn, timeout=timeout)
     
@@ -39,7 +39,7 @@ async def aggregate(
                         success=success,
                         elapsed_ms=r.elapsed_ms,
                         status_code=r.status,
-                        wait_ms=getattr(r, 'wait_ms', 0.0),
+                        wait_ms=r.wait_ms,
                         initial_concurrent=max_concurrent
                     )
                     stats = await collector.get_or_create(r.url, max_concurrent)
@@ -55,19 +55,21 @@ async def aggregate(
     total_wait_ms = 0.0
     max_wait_ms = 0.0
     wait_count = 0
+    total_elapsed_ms = 0.0
     
     for r in raw_results:
         if isinstance(r, Exception):
             results.append({
                 "url": "unknown",
                 "error": str(r),
-                "elapsed_ms": 0
+                "elapsed_ms": 0,
+                "wait_ms": 0
             })
         else:
             entry = {
                 "url": r.url,
                 "elapsed_ms": r.elapsed_ms,
-                "wait_ms": getattr(r, 'wait_ms', 0.0),
+                "wait_ms": r.wait_ms,
             }
             if r.timeout:
                 entry["timeout"] = True
@@ -82,12 +84,14 @@ async def aggregate(
                 entry["data"] = r.data
             results.append(entry)
             
-            wait = getattr(r, 'wait_ms', 0.0)
-            total_wait_ms += wait
-            max_wait_ms = max(max_wait_ms, wait)
+            total_wait_ms += r.wait_ms
+            max_wait_ms = max(max_wait_ms, r.wait_ms)
+            total_elapsed_ms += r.elapsed_ms
             wait_count += 1
     
     avg_wait_ms = round(total_wait_ms / wait_count, 2) if wait_count > 0 else 0.0
+    avg_elapsed_ms = round(total_elapsed_ms / wait_count, 2) if wait_count > 0 else 0.0
+    total_wait_sum = round(total_wait_ms, 2)
     
     successful = sum(1 for r in results if "data" in r and r.get("status", 999) < 300)
     failed = sum(1 for r in results if "error" in r or r.get("timeout") or r.get("status", 999) >= 300)
@@ -107,6 +111,8 @@ async def aggregate(
             "total_time_ms": total_time_ms,
             "avg_wait_ms": avg_wait_ms,
             "max_wait_ms": round(max_wait_ms, 2),
+            "total_wait_ms": total_wait_sum,
+            "avg_elapsed_ms": avg_elapsed_ms,
             "strategy_used": strategy_name,
             "concurrent_used": max_concurrent if strategy_name != "adaptive" else "dynamic",
         },

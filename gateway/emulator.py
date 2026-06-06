@@ -105,7 +105,26 @@ class EmulatorSuite:
             "A": EmulatorSuite.create_scenario_a,
             "B": EmulatorSuite.create_scenario_b,
             "C": EmulatorSuite.create_scenario_c,
+            "B_large": EmulatorSuite.create_scenario_b_large,
         }
         if name not in scenarios:
             raise ValueError(f"Unknown scenario: {name}")
         return scenarios[name]()
+
+    @staticmethod
+    def create_scenario_b_large() -> List[APIEmulator]:
+        emulators = []
+        
+        # 40 быстрых хостов
+        for i in range(40):
+            emulators.append(
+                APIEmulator(port=9000 + i, name=f"fast_{i}", delay_ms=50 + i)
+            )
+        
+        # 10 медленных хостов
+        for i in range(10):
+            emulators.append(
+                APIEmulator(port=9040 + i, name=f"slow_{i}", delay_ms=(3000, 5000))
+            )
+        
+        return emulators
